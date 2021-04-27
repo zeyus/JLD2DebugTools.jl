@@ -12,6 +12,12 @@ let
 end
 
 export describe, committed_datatypes
+
+function Base.show(io::IO, roffset::RelOffset)
+    print(io, "RelOffset($(Int(roffset.offset)))")
+end
+
+
 ############################################################################################
 ##                                      describe                                          ##
 ############################################################################################
