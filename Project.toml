@@ -1,0 +1,7 @@
+name = "JLD2DebugTools"
+uuid = "dea85e0d-6592-4e00-a4c6-932bfb2a034d"
+authors = ["Jonas Isensee <jonas.isensee@web.de> and contributors"]
+version = "0.1.0"
+
+[compat]
+julia = "1.5"
