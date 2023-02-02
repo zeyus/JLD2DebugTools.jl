@@ -203,7 +203,7 @@ end
 
 function stringify_committed_datatype(f, cdt; showfields=false)
     io = f.io
-    dt, attrs = read_committed_datatype(f, cdt)
+    dt, attrs = read_shared_datatype(f, cdt)
     written_type_str = ""
     julia_type_str = ""
     for attr in attrs
@@ -292,7 +292,7 @@ function stringify_object(f, offset)
     io = f.io
     seek(io, fileoffset(f, offset))
     cio = begin_checksum_read(io)
-    sz = read_obj_start(cio)
+    sz, = read_obj_start(cio)
     pmax = position(cio) + sz
 
     # Messages
@@ -300,10 +300,9 @@ function stringify_object(f, offset)
     attrs = EMPTY_READ_ATTRIBUTES
     datatype_class::UInt8 = 0
     datatype_offset::Int64 = 0
-    data_offset::Int64 = 0
-    data_length::Int = -1
     chunked_storage::Bool = false
-    filter_id::UInt16 = 0
+    layout::DataLayout = DataLayout(0,0,0,-1)
+    filter_pipeline::FilterPipeline = FilterPipeline(Filter[])
     while position(cio) <= pmax-4
         msg = jlread(cio, HeaderMessage)
         endpos = position(cio) + msg.size
@@ -314,37 +313,9 @@ function stringify_object(f, offset)
         elseif msg.msg_type == HM_FILL_VALUE
             (jlread(cio, UInt8) == 3 && jlread(cio, UInt8) == 0x09) || throw(UnsupportedFeatureException())
         elseif msg.msg_type == HM_DATA_LAYOUT
-            jlread(cio, UInt8) == 4 || throw(UnsupportedVersionException())
-            storage_type = jlread(cio, UInt8)
-            if storage_type == LC_COMPACT_STORAGE
-                data_length = jlread(cio, UInt16)
-                data_offset = position(cio)
-            elseif storage_type == LC_CONTIGUOUS_STORAGE
-                data_offset = fileoffset(f, jlread(cio, RelOffset))
-                data_length = jlread(cio, Length)
-            elseif storage_type == LC_CHUNKED_STORAGE
-                # TODO: validate this
-                flags = jlread(cio, UInt8)
-                dimensionality = jlread(cio, UInt8)
-                dimensionality_size = jlread(cio, UInt8)
-                skip(cio, Int(dimensionality)*Int(dimensionality_size))
-
-                chunk_indexing_type = jlread(cio, UInt8)
-                chunk_indexing_type == 1 || throw(UnsupportedFeatureException("Unknown chunk indexing type"))
-                data_length = jlread(cio, Length)
-                jlread(cio, UInt32)
-                data_offset = fileoffset(f, jlread(cio, RelOffset))
-                chunked_storage = true
-            else
-                throw(UnsupportedFeatureException("Unknown data layout"))
-            end
+            layout = jlread(cio, DataLayout, f)
         elseif msg.msg_type == HM_FILTER_PIPELINE
-            version = jlread(cio, UInt8)
-            version == 2 || throw(UnsupportedVersionException("Filter Pipeline Message version $version is not implemented"))
-            nfilters = jlread(cio, UInt8)
-            nfilters == 1 || throw(UnsupportedFeatureException())
-            filter_id = jlread(cio, UInt16)
-            issupported_filter(filter_id) || throw(UnsupportedFeatureException("Unknown Compression Filter $filter_id"))
+            filter_pipeline = jlread(cio, FilterPipeline)
         elseif msg.msg_type == HM_ATTRIBUTE
             if attrs === EMPTY_READ_ATTRIBUTES
                 attrs = ReadAttribute[read_attribute(cio, f)]
@@ -358,7 +329,7 @@ function stringify_object(f, offset)
     end
     seek(cio, pmax)
 
-    filter_id != 0 && !chunked_storage && throw(InvalidDataException("Compressed data must be chunked"))
+    iscompressed(filter_pipeline) && !ischunked(layout)  && throw(InvalidDataException("Compressed data must be chunked"))
 
     # Checksum
     end_checksum(cio) == jlread(io, UInt32) || throw(InvalidDataException("Invalid Checksum"))
@@ -371,14 +342,14 @@ function stringify_object(f, offset)
 
     if datatype_class == typemax(UInt8) # Committed datatype
         rr = jltype(f, f.datatype_locations[h5offset(f, datatype_offset)])
-        seek(io, data_offset)
+        seek(io, layout.data_offset)
         typestr = jlconvert_string(rr, f, io.curptr)
     else
         seek(io, datatype_offset)
         @read_datatype io datatype_class dt begin
             rr = jltype(f, dt)
-            seek(io, data_offset)
-            read_dataspace = (dataspace, NULL_REFERENCE, data_length, filter_id)
+            seek(io, layout.data_offset)
+            read_dataspace = (dataspace, NULL_REFERENCE, layout, filter_pipeline)
             res = read_data(f, rr, read_dataspace, nothing)
             string(res)
         end
@@ -438,6 +409,13 @@ function jlconvert_string(::ReadRepresentation{Union, UnionTypeODR()}, f::JLDFil
     #= v = Union{datatypes..., unionalls...}
     track_weakref!(f, header_offset, v)
     v =#
+end
+
+function jlconvert_string(rr::ReadRepresentation,
+                        f::JLDFile,
+                        ptr::Ptr) where T
+    # so apparently this is a custom struct with plain fields that wants to be loaded
+    string(jlconvert(rr, f, ptr, UNDEFINED_ADDRESS))
 end
 
 
